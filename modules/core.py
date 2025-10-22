@@ -94,7 +94,7 @@ class Instpector():
 
     def _get_login_headers(self):
         try:
-            response = self.session.get(LOGIN_URL, timeout=10)
+            response = self.session.get(BASE_URL + "/accounts/login/", timeout=10)
         except RequestException as req_exception:
             logger.debug("GET RequestException: %s", req_exception)
             return
