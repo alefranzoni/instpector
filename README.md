@@ -35,7 +35,6 @@ Then install the required dependencies
 ```bash
 pip install cryptography
 pip install requests
-pip install json
 ```
 
 ## First time: What do I need to know?
