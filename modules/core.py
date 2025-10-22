@@ -1,8 +1,17 @@
+import logging
 import json
 import re
 import sys
 from datetime import datetime
 from getpass import getpass
+from typing import Optional
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="[%(levelname)s] %(message)s"
+)
+logger = logging.getLogger(__name__)
+
 import requests
 from requests.exceptions import RequestException
 from modules.argument_manager import ArgumentManager
@@ -19,14 +28,22 @@ USER_QUERY = BASE_URL + "/web/search/topsearch/?query={}"
 GRAPHQL_QUERY = BASE_URL + "/graphql/query/?query_hash={}&variables={}"
 FOLLOWERS_QUERY_HASH = "c76146de99bb02f6415203be841dd25a"
 FOLLOWINGS_QUERY_HASH = "d04b0a864b4b54837c0d870b0e77e076"
-TIME_LIMIT = "🚫 Execution interrupted. For safety reasons, you must wait 60 minutes before retrieving the data again"
+TIME_LIMIT_MESSAGE = "🚫 Execution interrupted. For safety reasons, you must wait 60 minutes before retrieving the data again"
+UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
+DEFAULT_HEADERS = {
+    "User-Agent": UA,
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Referer": BASE_URL + "/",
+    "X-Requested-With": "XMLHttpRequest",
+}
 
 class Instpector():
-
-    def __init__(self, arguments:ArgumentManager=None):
+    def __init__(self, arguments: Optional[ArgumentManager] = None):
         print("🚀 The environment is getting ready...")
 
         self.session = requests.session()
+        self.session.headers.update(DEFAULT_HEADERS)
         self.args = arguments
         self._user = None
         self._user_id = None
@@ -79,21 +96,55 @@ class Instpector():
         try:
             response = self.session.get(LOGIN_URL, timeout=10)
         except RequestException as req_exception:
-            print(f"GET RequestException: {req_exception}")
+            logger.debug("GET RequestException: %s", req_exception)
             return
-        else:
-            self._save_auth_headers(response.cookies.get_dict(".instagram.com"))      
+        
+        if response.history:
+            logger.debug("GET redirect chain:")
+            for r in response.history:
+                logger.debug(" - %s -> %s", r.status_code, r.headers.get("Location"))
 
-    def _save_auth_headers(self, cookies):
-        csrf = cookies["csrftoken"]
-        mid = cookies["mid"]
-        ig_did = cookies["ig_did"]
-        ig_nrcb = cookies["ig_nrcb"]
+        cookies = response.cookies.get_dict()
+        set_cookie_header = response.headers.get("Set-Cookie", "")
+
+        self._save_auth_headers(cookies, set_cookie_header)    
+
+    def _save_auth_headers(self, cookies, set_cookie_header=""):
+        csrf = cookies.get("csrftoken") or cookies.get("csrf_token")
+        mid = cookies.get("mid") or ""
+        ig_did = cookies.get("ig_did") or ""
+        ig_nrcb = cookies.get("ig_nrcb") or ""
+
+        if not csrf:
+            m = re.search(r"csrftoken=([^;]+)", set_cookie_header)
+            if m:
+                csrf = m.group(1)
+
+        if not csrf:
+            logger.debug("Failed to obtain csrftoken; the GET response did not return it.")
+            self._auth_headers = {}
+            return
+        
+        self.session.headers.update({"X-CSRFToken": csrf})
+        cookie_parts = [f"csrftoken={csrf}"]
+        if mid:
+            cookie_parts.append(f"mid={mid}")
+        if ig_did:
+            cookie_parts.append(f"ig_did={ig_did}")
+        if ig_nrcb:
+            cookie_parts.append(f"ig_nrcb={ig_nrcb}")
+        cookie_header = "; ".join(cookie_parts) + ";"
+    
         headers = {
-            'X-CSRFToken': f'{csrf}',
-            'Cookie': f"csrftoken={csrf}; mid={mid}; ig_did={ig_did}; ig_nrcb={ig_nrcb};"
+            "X-CSRFToken": csrf,
+            "Cookie": cookie_header,
+            "Referer": BASE_URL + "/",
+            "User-Agent": UA,
+            "X-Requested-With": "XMLHttpRequest",
         }
+
         self._auth_headers = headers
+        self._auth_cookies = {"csrftoken": csrf, "mid": mid, "ig_did": ig_did, "ig_nrcb": ig_nrcb}
 
     def _login_execute(self):
         int_time = int(datetime.now().timestamp())
@@ -106,8 +157,21 @@ class Instpector():
         self._attempt_login(LOGIN_URL, payload)
 
     def _attempt_login(self, url, payload):
-        headers = self._auth_headers
-        response = self.session.post(url, data=payload, headers=headers, timeout=10)
+        headers = self._auth_headers or self.session.headers
+        
+        try:
+            response = self.session.post(url, data=payload, headers=headers, timeout=10, allow_redirects=False)
+        except requests.TooManyRedirects as e:
+            resp = getattr(e, "response", None)
+            if resp is not None and getattr(resp, "history", None):
+                for r in resp.history:
+                    logger.debug(" - %s -> %s", r.status_code, r.headers.get("Location"))
+            raise AuthenticationFailException("Too many redirects during login POST")
+        except RequestException as req_exception:
+            raise AuthenticationFailException(f"POST RequestException: {req_exception}")
+        
+        if 300 <= response.status_code < 400:
+            logger.debug("Login POST returned redirect %s -> %s", response.status_code, response.headers.get("Location"))
 
         try:
             data = response.json()
@@ -172,7 +236,7 @@ class Instpector():
             diff = (datetime.now() - last_update).total_seconds() / 60
 
             if not diff >= 60:
-                print(TIME_LIMIT)
+                print(TIME_LIMIT_MESSAGE)
                 print(f"🕒 Last update was on {last_update.strftime('%Y-%m-%d %H:%M')}")
                 sys.exit()
 
