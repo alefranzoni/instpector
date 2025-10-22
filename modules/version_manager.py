@@ -1,7 +1,7 @@
 import requests
 from modules.utils import print_red
 
-CURRENT = "1.0.0"
+CURRENT = "1.1.0"
 RELEASES_API = "https://api.github.com/repos/alefranzoni/instpector/releases"
 REPO_URL = "https://github.com/alefranzoni/instpector/"
 
